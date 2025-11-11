@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "superquizhero-secret-key-2025";
 
-// === RANK SYSTEM (SAME AS FRONTEND) ===
+// === RANK SYSTEM ===
 const RANKS = [
   { name: "Bronze I", min: 0, difficulty: "easy" },
   { name: "Bronze II", min: 100, difficulty: "easy" },
@@ -40,11 +40,7 @@ const getRank = (xp) => {
 };
 
 // Middleware
-app.use(
-  cors({
-    origin: "*", // Dev only! Change to your domain in production
-  })
-);
+app.use(cors({ origin: "*" })); // Dev only
 app.use(express.json());
 
 // MongoDB Connection
@@ -59,6 +55,23 @@ mongoose
     process.exit(1);
   });
 
+// === ACHIEVEMENTS DATA (SERVER-SIDE) ===
+const ACHIEVEMENTS = [
+  { id: "first_win", xpReward: 50 },
+  { id: "streak_3", xpReward: 100 },
+  { id: "perfect_score", xpReward: 150 },
+  { id: "speed_demon", xpReward: 120 },
+  { id: "math_master", xpReward: 200 },
+  { id: "level_50", xpReward: 500 },
+  { id: "level_100", xpReward: 1000 },
+  { id: "level_200", xpReward: 2500 },
+  { id: "gold_rank", xpReward: 800 },
+  { id: "platinum_rank", xpReward: 1200 },
+  { id: "diamond_rank", xpReward: 2000 },
+  { id: "master_rank", xpReward: 3000 },
+  { id: "legend", xpReward: 5000 },
+];
+
 // User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
@@ -67,13 +80,19 @@ const userSchema = new mongoose.Schema({
   avatar: { type: String, default: "Superhero" },
   country: { type: String, default: "PH" },
 
-  // NEW FIELDS
-  currentRank: { type: String, default: "Beginner" },
-  leaderboardPosition: { type: Number, default: null }, // null = not ranked yet
+  // ACHIEVEMENTS
+  achievements: { type: [String], default: [] },
+  streak: { type: Number, default: 0 },
+  lastPlayed: { type: Date },
+  categoryProgress: {
+    type: Map,
+    of: Number,
+    default: () => new Map(),
+  },
 });
 const User = mongoose.model("User", userSchema);
 
-// Middleware: Verify JWT
+// Middleware: Authenticate
 const authenticate = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ msg: "No token" });
@@ -121,6 +140,7 @@ app.post("/api/register", async (req, res) => {
         avatar: user.avatar,
         level: Math.floor(user.xp / 50) + 1,
         rank: rank.name,
+        achievements: user.achievements,
       },
     });
   } catch (err) {
@@ -151,6 +171,7 @@ app.post("/api/login", async (req, res) => {
         avatar: user.avatar,
         level: Math.floor(user.xp / 50) + 1,
         rank: rank.name,
+        achievements: user.achievements,
       },
     });
   } catch (err) {
@@ -159,13 +180,150 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// === UPDATE USER (XP & Avatar) ===
+// === UPDATE USER (XP, Avatar, Achievements) ===
 app.post("/api/update", authenticate, async (req, res) => {
   try {
-    const { xp, avatar } = req.body;
+    const { xp, avatar, achievementId, category, timeTaken, isPerfect } =
+      req.body;
 
+    // Update XP
     if (xp !== undefined) req.user.xp = xp;
+
+    // Update Avatar
     if (avatar) req.user.avatar = avatar;
+
+    // === ACHIEVEMENT UNLOCK LOGIC ===
+    const unlocked = [];
+
+    // Manual achievement (e.g., first_win)
+    if (achievementId && !req.user.achievements.includes(achievementId)) {
+      const ach = ACHIEVEMENTS.find((a) => a.id === achievementId);
+      if (ach) {
+        req.user.achievements.push(achievementId);
+        req.user.xp += ach.xpReward;
+        unlocked.push({ id: achievementId, xpReward: ach.xpReward });
+      }
+    }
+
+    // === LEVEL ACHIEVEMENTS ===
+    const level = Math.floor(req.user.xp / 50) + 1;
+    if (level >= 50 && !req.user.achievements.includes("level_50")) {
+      req.user.achievements.push("level_50");
+      req.user.xp += 500;
+      unlocked.push({ id: "level_50", xpReward: 500 });
+    }
+    if (level >= 100 && !req.user.achievements.includes("level_100")) {
+      req.user.achievements.push("level_100");
+      req.user.xp += 1000;
+      unlocked.push({ id: "level_100", xpReward: 1000 });
+    }
+    if (level >= 200 && !req.user.achievements.includes("level_200")) {
+      req.user.achievements.push("level_200");
+      req.user.xp += 2500;
+      unlocked.push({ id: "level_200", xpReward: 2500 });
+    }
+
+    // === RANK ACHIEVEMENTS ===
+    const rankName = getRank(req.user.xp).name;
+    const rankTier = rankName.split(" ")[0];
+
+    if (
+      ["Gold I", "Gold II", "Gold III"].includes(rankName) &&
+      !req.user.achievements.includes("gold_rank")
+    ) {
+      req.user.achievements.push("gold_rank");
+      req.user.xp += 800;
+      unlocked.push({ id: "gold_rank", xpReward: 800 });
+    }
+    if (
+      rankTier === "Platinum" &&
+      !req.user.achievements.includes("platinum_rank")
+    ) {
+      req.user.achievements.push("platinum_rank");
+      req.user.xp += 1200;
+      unlocked.push({ id: "platinum_rank", xpReward: 1200 });
+    }
+    if (
+      rankTier === "Diamond" &&
+      !req.user.achievements.includes("diamond_rank")
+    ) {
+      req.user.achievements.push("diamond_rank");
+      req.user.xp += 2000;
+      unlocked.push({ id: "diamond_rank", xpReward: 2000 });
+    }
+    if (
+      rankTier === "Master" &&
+      !req.user.achievements.includes("master_rank")
+    ) {
+      req.user.achievements.push("master_rank");
+      req.user.xp += 3000;
+      unlocked.push({ id: "master_rank", xpReward: 3000 });
+    }
+    if (rankName === "Legend" && !req.user.achievements.includes("legend")) {
+      req.user.achievements.push("legend");
+      req.user.xp += 5000;
+      unlocked.push({ id: "legend", xpReward: 5000 });
+    }
+
+    // === STREAK UPDATE ===
+    const today = new Date().setHours(0, 0, 0, 0);
+    const last = req.user.lastPlayed
+      ? new Date(req.user.lastPlayed).setHours(0, 0, 0, 0)
+      : 0;
+
+    if (today !== last) {
+      if (today - last === 86400000) {
+        req.user.streak += 1;
+      } else {
+        req.user.streak = 1;
+      }
+      req.user.lastPlayed = new Date();
+
+      if (
+        req.user.streak === 3 &&
+        !req.user.achievements.includes("streak_3")
+      ) {
+        const ach = ACHIEVEMENTS.find((a) => a.id === "streak_3");
+        req.user.achievements.push("streak_3");
+        req.user.xp += ach.xpReward;
+        unlocked.push({ id: "streak_3", xpReward: ach.xpReward });
+      }
+    }
+
+    // === CATEGORY PROGRESS (e.g., Math Master) ===
+    if (category) {
+      const count = (req.user.categoryProgress.get(category) || 0) + 1;
+      req.user.categoryProgress.set(category, count);
+
+      if (
+        category === "Math" &&
+        count >= 5 &&
+        !req.user.achievements.includes("math_master")
+      ) {
+        const ach = ACHIEVEMENTS.find((a) => a.id === "math_master");
+        req.user.achievements.push("math_master");
+        req.user.xp += ach.xpReward;
+        unlocked.push({ id: "math_master", xpReward: ach.xpReward });
+      }
+    }
+
+    // === SPEED DEMON & PERFECT SCORE ===
+    if (
+      timeTaken !== undefined &&
+      timeTaken < 10 &&
+      !req.user.achievements.includes("speed_demon")
+    ) {
+      const ach = ACHIEVEMENTS.find((a) => a.id === "speed_demon");
+      req.user.achievements.push("speed_demon");
+      req.user.xp += ach.xpReward;
+      unlocked.push({ id: "speed_demon", xpReward: ach.xpReward });
+    }
+    if (isPerfect && !req.user.achievements.includes("perfect_score")) {
+      const ach = ACHIEVEMENTS.find((a) => a.id === "perfect_score");
+      req.user.achievements.push("perfect_score");
+      req.user.xp += ach.xpReward;
+      unlocked.push({ id: "perfect_score", xpReward: ach.xpReward });
+    }
 
     await req.user.save();
     const rank = getRank(req.user.xp);
@@ -175,6 +333,8 @@ app.post("/api/update", authenticate, async (req, res) => {
       avatar: req.user.avatar,
       level: Math.floor(req.user.xp / 50) + 1,
       rank: rank.name,
+      achievements: req.user.achievements,
+      unlockedAchievements: unlocked, // For confetti
     });
   } catch (err) {
     console.error("Update error:", err);
@@ -191,26 +351,28 @@ app.get("/api/profile", authenticate, (req, res) => {
     avatar: req.user.avatar,
     level: Math.floor(req.user.xp / 50) + 1,
     rank: rank.name,
+    achievements: req.user.achievements,
   });
 });
 
-// === LEADERBOARD: TOP 10 BY RANK + XP ===
+// === LEADERBOARD ===
 app.get("/api/leaderboard", authenticate, async (req, res) => {
   try {
     const users = await User.find()
-      .select("username xp avatar")
+      .select("username xp avatar achievements")
       .sort({ xp: -1 })
       .limit(10);
 
-    const leaderboard = users.map((user) => {
+    const leaderboard = users.map((user, index) => {
       const rank = getRank(user.xp);
       return {
-        _id: user._id,
+        position: index + 1,
         username: user.username,
         xp: user.xp,
         avatar: user.avatar,
         level: Math.floor(user.xp / 50) + 1,
         rank: rank.name,
+        achievements: user.achievements,
       };
     });
 
@@ -223,7 +385,7 @@ app.get("/api/leaderboard", authenticate, async (req, res) => {
 
 // Health Check
 app.get("/", (req, res) => {
-  res.json({ msg: "Super Quiz Hero API is LIVE!" });
+  res.json({ msg: "BrightMinds API is LIVE! (Nov 11, 2025)" });
 });
 
 // Start Server
